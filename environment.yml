@@ -1,0 +1,49 @@
+name: cubediff
+channels:
+  - conda-forge
+  - defaults
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+dependencies:
+  - ca-certificates=2025.2.25
+  - colorama=0.4.6
+  - einops=0.8.1
+  - freetype=2.10.4
+  - jbig=2.1
+  - jpeg=9e
+  - lcms2=2.12
+  - lerc=2.2.1
+  - libblas=3.9.0
+  - libcblas=3.9.0
+  - libcxx=14.0.6
+  - libdeflate=1.7
+  - libffi=3.4.4
+  - libgfortran=14.2.0
+  - libgfortran5=14.2.0
+  - liblapack=3.9.0
+  - libopenblas=0.3.29
+  - libpng=1.6.37
+  - libtiff=4.3.0
+  - libwebp-base=1.5.0
+  - llvm-openmp=20.1.2
+  - lz4-c=1.9.3
+  - ncurses=6.4
+  - numpy=1.24.2
+  - olefile=0.47
+  - openjpeg=2.4.0
+  - openssl=3.5.0
+  - pillow=8.3.2
+  - pip=25.0
+  - python=3.9.7
+  - python_abi=3.9
+  - readline=8.2
+  - setuptools=75.8.0
+  - sqlite=3.45.3
+  - tk=8.6.14
+  - tqdm=4.67.1
+  - tzdata=2025a
+  - wheel=0.45.1
+  - xz=5.6.4
+  - zlib=1.2.13
+  - zstd=1.5.0
+prefix: /Users/mcan/miniconda3/envs/cubediff
