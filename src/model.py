@@ -18,6 +18,7 @@ class CubeDiff(nn.Module):
         enable_overlap=True,
         face_overlap_degrees=2.5
     ):
+        print(f"Loading model from {pretrained_model_path}")
         super().__init__()
 
         print(f"Initializing CubeDiff with model: {pretrained_model_path}")

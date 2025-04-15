@@ -17,7 +17,8 @@ def main(args):
         args: Command-line arguments
     """
     # Load model
-    print(f"Loading model from {args.model_path}")
+    #
+    if args.model_path: print(f"Loading model from {args.model_path}")
     model = CubeDiff(
         pretrained_model_path=args.pretrained_model_path,
         enable_overlap=True,
