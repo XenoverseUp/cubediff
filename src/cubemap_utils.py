@@ -3,13 +3,15 @@ import numpy as np
 from PIL import Image
 
 
-def equirectangular_to_cubemap(equirect_img, face_size=512):
+def equirectangular_to_cubemap(equirect_img, face_size=512, enable_overlap=True, overlap_degrees=2.5):
     """
     Convert equirectangular image to 6 cubemap faces
 
     Args:
         equirect_img (PIL.Image): Equirectangular image
         face_size (int): Size of each face
+        enable_overlap (bool): Enable overlapping predictions
+        overlap_degrees (float): Overlap in degrees for each face
 
     Returns:
         list: List of 6 PIL images [front, back, up, down, left, right]
@@ -17,6 +19,11 @@ def equirectangular_to_cubemap(equirect_img, face_size=512):
     # Get equirectangular dimensions
     equirect_width, equirect_height = equirect_img.size
     equirect = np.array(equirect_img)
+
+    # Calculate actual FOV based on overlap
+    fov = 90.0
+    if enable_overlap:
+        fov += 2 * overlap_degrees
 
     # Initialize cubemap faces
     faces = []
@@ -32,6 +39,11 @@ def equirectangular_to_cubemap(equirect_img, face_size=512):
                 # Normalize to [-1, 1]
                 nx = 2 * (x + 0.5) / face_size - 1
                 ny = 2 * (y + 0.5) / face_size - 1
+
+                # Calculate FOV multiplier
+                fov_mul = math.tan(math.radians(fov / 2)) / math.tan(math.radians(90 / 2))
+                nx *= fov_mul
+                ny *= fov_mul
 
                 # Get 3D vector based on face
                 if face_idx == 0:  # Front
@@ -71,7 +83,7 @@ def equirectangular_to_cubemap(equirect_img, face_size=512):
     return faces
 
 
-def cubemap_to_equirectangular(cubemap_faces, output_width=2048, output_height=1024):
+def cubemap_to_equirectangular(cubemap_faces, output_width=2048, output_height=1024, enable_overlap=True, overlap_degrees=2.5):
     """
     Convert 6 cubemap faces to equirectangular projection
 
@@ -79,10 +91,19 @@ def cubemap_to_equirectangular(cubemap_faces, output_width=2048, output_height=1
         cubemap_faces (list): List of 6 PIL images [front, back, up, down, left, right]
         output_width (int): Width of output equirectangular image
         output_height (int): Height of output equirectangular image
+        enable_overlap (bool): Whether faces have overlapping regions
+        overlap_degrees (float): Overlap in degrees for each face
 
     Returns:
         PIL.Image: Equirectangular image
     """
+    # Crop faces if they have overlap
+    if enable_overlap:
+        cropped_faces = []
+        for face in cubemap_faces:
+            cropped_faces.append(crop_image_for_overlap(face, overlap_degrees))
+        cubemap_faces = cropped_faces
+
     # Convert PIL images to numpy arrays
     cube_arrays = [np.array(face) for face in cubemap_faces]
     face_size = cube_arrays[0].shape[0]
@@ -155,3 +176,28 @@ def cubemap_to_equirectangular(cubemap_faces, output_width=2048, output_height=1
             equirect[y, x] = cube_arrays[face_idx][py, px]
 
     return Image.fromarray(equirect)
+
+
+def crop_image_for_overlap(image, overlap_degrees=2.5):
+    """
+    Crop image to remove overlapping regions
+
+    Args:
+        image (PIL.Image): Image to crop
+        overlap_degrees (float): Amount of overlap in degrees
+
+    Returns:
+        PIL.Image: Cropped image
+    """
+    width, height = image.size
+
+    # Calculate crop margins
+    standard_fov = 90.0
+    actual_fov = standard_fov + (2 * overlap_degrees)
+
+    margin_ratio = overlap_degrees / actual_fov
+    margin_x = int(width * margin_ratio)
+    margin_y = int(height * margin_ratio)
+
+    # Crop image
+    return image.crop((margin_x, margin_y, width - margin_x, height - margin_y))

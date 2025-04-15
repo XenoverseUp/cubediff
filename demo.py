@@ -5,7 +5,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 
 from src.model import CubeDiff
-from inference import generate_panorama
+from src.inference import generate_panorama
 from src.cubemap_utils import cubemap_to_equirectangular
 
 

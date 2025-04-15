@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 from diffusers.models.attention_processor import Attention
 
@@ -27,19 +26,34 @@ class CubemapAttention(nn.Module):
             encoder_hidden_states = kwargs.get("encoder_hidden_states", None)
 
             if encoder_hidden_states is not None:
-                # For cross-attention, keep text embeddings as is
-                # The original attention will handle it correctly
-                result = self.original_attention(hidden_states_reshaped, **kwargs)
-            else:
-                # For self-attention, also reshape the attention mask if present
-                attention_mask = kwargs.get("attention_mask", None)
-                if attention_mask is not None:
-                    # Reshape attention mask to match reshaped hidden states
-                    attention_mask = attention_mask.reshape(actual_batch, -1)
-                    kwargs["attention_mask"] = attention_mask
+                # For cross-attention, we need to duplicate encoder_hidden_states for each face
+                # to match the reshaped hidden states batch size
+                encoder_batch_size = encoder_hidden_states.shape[0]
 
-                # Call original attention with reshaped states
-                result = self.original_attention(hidden_states_reshaped, **kwargs)
+                # If encoder batch size is different from actual batch (e.g., with classifier-free guidance)
+                if encoder_batch_size == actual_batch * 6:
+                    # Reshape to duplicate encoder states: (B*6, S, D) -> (B, 6*S, D)
+                    encoder_seq_length = encoder_hidden_states.shape[1]
+                    encoder_dim = encoder_hidden_states.shape[2]
+                    encoder_hidden_states = encoder_hidden_states.reshape(
+                        actual_batch, 6, encoder_seq_length, encoder_dim
+                    )
+                    encoder_hidden_states = encoder_hidden_states.reshape(
+                        actual_batch, 6 * encoder_seq_length, encoder_dim
+                    )
+
+                # Update kwargs with reshaped encoder states
+                kwargs["encoder_hidden_states"] = encoder_hidden_states
+
+            # For self-attention, also reshape the attention mask if present
+            attention_mask = kwargs.get("attention_mask", None)
+            if attention_mask is not None:
+                # Reshape attention mask to match reshaped hidden states
+                attention_mask = attention_mask.reshape(actual_batch, -1)
+                kwargs["attention_mask"] = attention_mask
+
+            # Call original attention with reshaped states
+            result = self.original_attention(hidden_states_reshaped, **kwargs)
 
             # Reshape result back to original format: (B, 6*L, D) -> (B*6, L, D)
             result = result.reshape(batch_size, sequence_length, dim)

@@ -29,15 +29,41 @@ class SynchronizedGroupNorm(nn.Module):
         # Handle 4D input: [batch, channels, height, width]
         batch_size, num_channels, height, width = x.shape
 
-        # Apply standard GroupNorm since we're having issues with synchronized version
-        num_groups = min(self.num_groups, num_channels)
-        return F.group_norm(
-            x,
-            num_groups=num_groups,
-            weight=self.weight[:num_channels] if self.weight.shape[0] >= num_channels else self.weight,
-            bias=self.bias[:num_channels] if self.bias.shape[0] >= num_channels else self.bias,
-            eps=self.eps
-        )
+        # Check if batch size is divisible by 6 (cubemap faces)
+        if batch_size % 6 == 0:
+            actual_batch = batch_size // 6
+            num_groups = min(self.num_groups, num_channels)
+
+            # Reshape to group channels
+            channels_per_group = num_channels // num_groups
+            x_reshaped = x.reshape(actual_batch, 6, num_groups, channels_per_group, height, width)
+
+            # Compute mean and variance across all spatial dimensions and faces
+            # but separately for each group
+            mean = x_reshaped.mean(dim=(4, 5), keepdim=True)  # Spatial dims
+            mean = mean.mean(dim=1, keepdim=True)  # Faces dim
+
+            var = ((x_reshaped - mean) ** 2).mean(dim=(4, 5), keepdim=True)  # Spatial dims
+            var = var.mean(dim=1, keepdim=True)  # Faces dim
+
+            # Normalize
+            x_normalized = (x_reshaped - mean) / torch.sqrt(var + self.eps)
+
+            # Reshape back
+            x_normalized = x_normalized.reshape(batch_size, num_channels, height, width)
+
+            # Apply weight and bias
+            return x_normalized * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
+        else:
+            # Standard GroupNorm for non-cubemap inputs
+            num_groups = min(self.num_groups, num_channels)
+            return F.group_norm(
+                x,
+                num_groups=num_groups,
+                weight=self.weight,
+                bias=self.bias,
+                eps=self.eps
+            )
 
     def _forward_3d(self, x):
         # Handle 3D input: [batch, sequence, channels]
