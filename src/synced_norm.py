@@ -16,7 +16,6 @@ class SynchronizedGroupNorm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(num_channels))
 
     def forward(self, x):
-        # Check input dimensionality
         if len(x.shape) == 4:
             # 4D input: [batch, channels, height, width]
             return self._forward_4d(x)
