@@ -186,10 +186,7 @@ class CubeDiff(nn.Module):
             pos_enc = generate_cubemap_positional_encoding(
                 batch_size // 6, height, width, device=latents.device)
 
-        # Apply positional encoding by concatenating it with the latents
-        # This allows the model to better understand the spatial relationships
-        # between different faces of the cubemap
-        scaled_pos_enc = pos_enc * 0.1  # Scale to not dominate the latents
+
 
         # Improved positional encoding application - concatenate to first 2 channels
         # Clone to avoid modifying the original latents

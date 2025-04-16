@@ -49,12 +49,10 @@ class CubemapAttention(nn.Module):
                     pass
                 # For classifier-free guidance (concatenated conditional and unconditional)
                 elif encoder_batch_size == 2 * actual_batch:
-                    # Handle the case where we have [uncond, cond] for each cubemap
-                    # We need to keep the unconditional and conditional parts separate
-                    uncond = encoder_hidden_states[:actual_batch]
-                    cond = encoder_hidden_states[actual_batch:]
-                    # Now we can use them directly
-                    encoder_hidden_states = encoder_hidden_states
+                    # For classifier-free guidance, we don't need to modify the encoder states
+                    # The first half contains unconditional and the second half contains conditional
+                    # encodings, which is already what we want
+                    pass
 
                 # Update kwargs with proper encoder states
                 kwargs["encoder_hidden_states"] = encoder_hidden_states
