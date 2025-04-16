@@ -3,6 +3,7 @@ import torch.nn as nn
 
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
+from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from transformers.models.clip.modeling_clip import CLIPTextModel
 from transformers.models.clip.tokenization_clip import CLIPTokenizer
 
@@ -16,12 +17,16 @@ class CubeDiff(nn.Module):
         self,
         pretrained_model_path="runwayml/stable-diffusion-v1-5",
         enable_overlap=True,
-        face_overlap_degrees=2.5
+        face_overlap_degrees=2.5,
+        vae_scale_factor=0.18215
     ):
         print(f"Loading model from {pretrained_model_path}")
         super().__init__()
 
         print(f"Initializing CubeDiff with model: {pretrained_model_path}")
+
+        # Store VAE scale factor
+        self.vae_scale_factor = vae_scale_factor
 
         # Load pretrained components
         self.tokenizer = CLIPTokenizer.from_pretrained(
@@ -131,7 +136,7 @@ class CubeDiff(nn.Module):
 
         # Encode condition image to latent
         with torch.no_grad():
-            condition_latent = self.vae.encode(condition_image).latent_dist.sample() * 0.18215
+            condition_latent = self.vae.encode(condition_image).latent_dist.sample() * self.vae_scale_factor
 
         # Generate noise for other 5 faces
         latent_shape = condition_latent.shape
@@ -146,7 +151,20 @@ class CubeDiff(nn.Module):
 
         return all_latents, mask
 
-    def forward(self, latents, timestep, encoder_hidden_states, mask=None, pos_enc=None):
+    def get_noise_scheduler(self, num_train_timesteps=1000, beta_start=0.00085,
+                           beta_end=0.012, beta_schedule="scaled_linear"):
+        """Get noise scheduler for training"""
+        scheduler = DDIMScheduler(
+            beta_start=beta_start,
+            beta_end=beta_end,
+            beta_schedule=beta_schedule,
+            num_train_timesteps=num_train_timesteps,
+            clip_sample=False
+        )
+
+        return scheduler
+
+    def forward(self, latents, timestep, encoder_hidden_states=None, mask=None, pos_enc=None):
         """
         Forward pass through the model
 
@@ -155,6 +173,8 @@ class CubeDiff(nn.Module):
             timestep (torch.Tensor): Current timestep
             encoder_hidden_states (torch.Tensor): Text embeddings
             mask (torch.Tensor, optional): Mask for conditioned faces
+            pos_enc (torch.Tensor, optional): Positional encoding
+            text_guidance (bool): Whether to use text guidance
 
         Returns:
             torch.Tensor: Predicted noise
@@ -162,7 +182,7 @@ class CubeDiff(nn.Module):
         # Get latent shape
         batch_size, channels, height, width = latents.shape
 
-        # Generate positional encoding
+        # Generate positional encoding if not provided
         if pos_enc is None:
             pos_enc = generate_cubemap_positional_encoding(
                 batch_size // 6, height, width, device=latents.device)
@@ -173,9 +193,10 @@ class CubeDiff(nn.Module):
         modified_latents = latents.clone()
         modified_latents[:, :2, :, :] = modified_latents[:, :2, :, :] + pos_enc * scale_factor
 
+
         # Forward pass through UNet
         noise_pred = self.unet(
-            modified_latents,  # Still has 4 channels
+            modified_latents,
             timestep,
             encoder_hidden_states=encoder_hidden_states,
             cross_attention_kwargs={"scale": 1.0},

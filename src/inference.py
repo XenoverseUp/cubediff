@@ -113,8 +113,6 @@ def generate_panorama(
     else:
         return images
 
-
-
 def crop_image_for_overlap(image, overlap_degrees=2.5):
     """
     Crop image to remove overlapping regions
