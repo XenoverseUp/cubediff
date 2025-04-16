@@ -34,17 +34,15 @@ class SynchronizedGroupNorm(nn.Module):
             actual_batch = batch_size // 6
             num_groups = min(self.num_groups, num_channels)
 
-            # Reshape to group channels
+            # Reshape to group channels and separate cubemap faces
             channels_per_group = num_channels // num_groups
             x_reshaped = x.reshape(actual_batch, 6, num_groups, channels_per_group, height, width)
 
-            # Compute mean and variance across all spatial dimensions and faces
-            # but separately for each group
-            mean = x_reshaped.mean(dim=(4, 5), keepdim=True)  # Spatial dims
-            mean = mean.mean(dim=1, keepdim=True)  # Faces dim
-
-            var = ((x_reshaped - mean) ** 2).mean(dim=(4, 5), keepdim=True)  # Spatial dims
-            var = var.mean(dim=1, keepdim=True)  # Faces dim
+            # Compute mean and variance across all spatial dimensions AND all faces simultaneously
+            # This is the key difference - we compute statistics across all faces together
+            # to ensure color consistency
+            mean = x_reshaped.mean(dim=(1, 4, 5), keepdim=True)  # Faces and spatial dims
+            var = ((x_reshaped - mean) ** 2).mean(dim=(1, 4, 5), keepdim=True)  # Faces and spatial dims
 
             # Normalize
             x_normalized = (x_reshaped - mean) / torch.sqrt(var + self.eps)
@@ -69,11 +67,27 @@ class SynchronizedGroupNorm(nn.Module):
         # Handle 3D input: [batch, sequence, channels]
         batch_size, sequence_length, num_channels = x.shape
 
-        # Use LayerNorm approach for 3D input
-        # Compute mean and variance along the channel dimension
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
-        x_normalized = (x - mean) / torch.sqrt(var + self.eps)
+        # For 3D input from attention layers
+        if batch_size % 6 == 0:
+            actual_batch = batch_size // 6
+
+            # Reshape to separate cubemap faces
+            x_reshaped = x.reshape(actual_batch, 6, sequence_length, num_channels)
+
+            # Compute mean and variance across faces and sequence length
+            mean = x_reshaped.mean(dim=(1, 2), keepdim=True)
+            var = x_reshaped.var(dim=(1, 2), keepdim=True, unbiased=False)
+
+            # Normalize
+            x_normalized = (x_reshaped - mean) / torch.sqrt(var + self.eps)
+
+            # Reshape back
+            x_normalized = x_normalized.reshape(batch_size, sequence_length, num_channels)
+        else:
+            # For non-cubemap inputs, use standard LayerNorm approach
+            mean = x.mean(dim=-1, keepdim=True)
+            var = x.var(dim=-1, keepdim=True, unbiased=False)
+            x_normalized = (x - mean) / torch.sqrt(var + self.eps)
 
         # Adapt weights to actual channel size
         if num_channels == self.weight.shape[0]:

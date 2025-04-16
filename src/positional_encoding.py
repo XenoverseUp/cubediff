@@ -5,6 +5,13 @@ import math
 def generate_cubemap_positional_encoding(batch_size, height, width, device="cuda"):
     """
     Generate positional encoding for cubemap faces.
+    Uses arctan2 to map 3D coordinates to UV space.
+
+    Args:
+        batch_size: Number of panoramas in batch
+        height: Height of latent feature map
+        width: Width of latent feature map
+        device: Device to create tensors on
 
     Returns:
         torch.Tensor: Position encoding of shape [batch_size*6, 2, height, width]
@@ -17,18 +24,18 @@ def generate_cubemap_positional_encoding(batch_size, height, width, device="cuda
     x_coords = torch.linspace(-1, 1, width, device=device)
     y_grid, x_grid = torch.meshgrid(y_coords, x_coords, indexing="ij")
 
-    # Direction functions for each face (front, back, up, down, left, right)
     # Create tensors of the same shape as x_grid and y_grid
     ones = torch.ones_like(x_grid)
 
-    # Define direction functions that return tensors
+    # Define direction vectors for each face according to the paper's convention
+    # Each function maps a (x,y) position on the face to a (x,y,z) direction vector
     cube_directions = [
-        lambda x, y: (ones, y, -x),           # front
-        lambda x, y: (-ones, y, x),           # back
-        lambda x, y: (x, ones, y),            # up
-        lambda x, y: (x, -ones, -y),          # down
-        lambda x, y: (-y, x, ones),           # left
-        lambda x, y: (y, x, -ones)            # right
+        lambda x, y: (ones, y, -x),           # front face (+X)
+        lambda x, y: (-ones, y, x),           # back face (-X)
+        lambda x, y: (x, ones, -y),           # up face (+Y)
+        lambda x, y: (x, -ones, y),           # down face (-Y)
+        lambda x, y: (x, y, ones),            # left face (+Z) - was incorrect
+        lambda x, y: (-x, y, -ones)           # right face (-Z) - was incorrect
     ]
 
     # Generate position encodings for each face
@@ -36,8 +43,14 @@ def generate_cubemap_positional_encoding(batch_size, height, width, device="cuda
         # Convert to 3D coordinates on cube
         x, y, z = direction_fn(x_grid, y_grid)
 
-        # Convert to UV coordinates using arctan2
-        u = torch.atan2(x, z)
+        # Normalize to ensure we're on the unit cube
+        norm = torch.sqrt(x*x + y*y + z*z)
+        x = x / norm
+        y = y / norm
+        z = z / norm
+
+        # Convert to UV coordinates using arctan2 as per paper equation (1)
+        u = torch.atan2(x, z)  # Note: x/z is correct for UV cubemap coord system
         v = torch.atan2(y, torch.sqrt(x*x + z*z))
 
         # Normalize to [0, 1]

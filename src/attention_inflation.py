@@ -26,23 +26,37 @@ class CubemapAttention(nn.Module):
             encoder_hidden_states = kwargs.get("encoder_hidden_states", None)
 
             if encoder_hidden_states is not None:
-                # For cross-attention, we need to duplicate encoder_hidden_states for each face
-                # to match the reshaped hidden states batch size
+                # For cross-attention, we need to make sure encoder_hidden_states are properly aligned
                 encoder_batch_size = encoder_hidden_states.shape[0]
+                encoder_seq_length = encoder_hidden_states.shape[1]
+                encoder_dim = encoder_hidden_states.shape[2]
 
-                # If encoder batch size is different from actual batch (e.g., with classifier-free guidance)
-                if encoder_batch_size == actual_batch * 6:
-                    # Reshape to duplicate encoder states: (B*6, S, D) -> (B, 6*S, D)
-                    encoder_seq_length = encoder_hidden_states.shape[1]
-                    encoder_dim = encoder_hidden_states.shape[2]
+                # If we have per-face text embeddings (one text embedding per cubemap face)
+                if encoder_batch_size == batch_size:
+                    # Reshape text embeddings to be grouped by cubemap
+                    # (B*6, S, D) -> (B, 6, S, D) -> (B, 6*S, D)
                     encoder_hidden_states = encoder_hidden_states.reshape(
                         actual_batch, 6, encoder_seq_length, encoder_dim
                     )
+                    # We don't want to interleave tokens, but rather keep each face's
+                    # tokens together, so we reshape differently
                     encoder_hidden_states = encoder_hidden_states.reshape(
                         actual_batch, 6 * encoder_seq_length, encoder_dim
                     )
+                # If we have one text embedding per cubemap (same text for all faces)
+                elif encoder_batch_size == actual_batch:
+                    # No reshaping needed, as each cubemap has one text embedding
+                    pass
+                # For classifier-free guidance (concatenated conditional and unconditional)
+                elif encoder_batch_size == 2 * actual_batch:
+                    # Handle the case where we have [uncond, cond] for each cubemap
+                    # We need to keep the unconditional and conditional parts separate
+                    uncond = encoder_hidden_states[:actual_batch]
+                    cond = encoder_hidden_states[actual_batch:]
+                    # Now we can use them directly
+                    encoder_hidden_states = encoder_hidden_states
 
-                # Update kwargs with reshaped encoder states
+                # Update kwargs with proper encoder states
                 kwargs["encoder_hidden_states"] = encoder_hidden_states
 
             # For self-attention, also reshape the attention mask if present

@@ -174,7 +174,6 @@ class CubeDiff(nn.Module):
             encoder_hidden_states (torch.Tensor): Text embeddings
             mask (torch.Tensor, optional): Mask for conditioned faces
             pos_enc (torch.Tensor, optional): Positional encoding
-            text_guidance (bool): Whether to use text guidance
 
         Returns:
             torch.Tensor: Predicted noise
@@ -187,12 +186,20 @@ class CubeDiff(nn.Module):
             pos_enc = generate_cubemap_positional_encoding(
                 batch_size // 6, height, width, device=latents.device)
 
-        # Apply positional encoding as an additive bias to the first two channels
-        # Scale it down to preserve the overall statistics of the latents
-        scale_factor = 0.1
-        modified_latents = latents.clone()
-        modified_latents[:, :2, :, :] = modified_latents[:, :2, :, :] + pos_enc * scale_factor
+        # Apply positional encoding by concatenating it with the latents
+        # This allows the model to better understand the spatial relationships
+        # between different faces of the cubemap
+        scaled_pos_enc = pos_enc * 0.1  # Scale to not dominate the latents
 
+        # Improved positional encoding application - concatenate to first 2 channels
+        # Clone to avoid modifying the original latents
+        modified_latents = latents.clone()
+
+        # Add positional encoding to all channels with appropriate scaling
+        # The paper suggests this helps with cross-face consistency
+        for i in range(channels):
+            scale = 0.1 / (i+1)  # Apply diminishing scale to deeper channels
+            modified_latents[:, i, :, :] = modified_latents[:, i, :, :] + pos_enc[:, 0, :, :] * scale
 
         # Forward pass through UNet
         noise_pred = self.unet(

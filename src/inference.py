@@ -4,6 +4,9 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
+from .positional_encoding import generate_cubemap_positional_encoding
+from .cubemap_utils import crop_image_for_overlap
+
 
 def generate_panorama(
     model,
@@ -70,6 +73,9 @@ def generate_panorama(
         latents = model.prepare_latents(batch_size=1, height=height, width=width, device=device)
         mask = None
 
+    # Generate position encodings
+    pos_enc = generate_cubemap_positional_encoding(1, latents.shape[2], latents.shape[3], device=device)
+
     # Denoising loop
     with torch.no_grad():
         for i, t in enumerate(tqdm(scheduler.timesteps, desc="Denoising")):
@@ -79,8 +85,22 @@ def generate_panorama(
             # Get current timestep
             timestep = t.expand(latent_model_input.shape[0]).to(device)
 
+            # Add positional encoding to each face's latents
+            # Clone input to avoid modifying the original
+            modified_latents = latent_model_input.clone()
+
+            # Apply position encoding to all channels with diminishing scale
+            for j in range(modified_latents.shape[1]):
+                scale = 0.1 / (j+1)  # Diminishing scale
+                modified_latents[:, j, :, :] = modified_latents[:, j, :, :] + pos_enc.repeat(2, 1, 1, 1)[:, 0, :, :] * scale
+
             # Predict noise
-            noise_pred = model(latent_model_input, timestep, text_embeddings, mask)
+            noise_pred = model.unet(
+                modified_latents,
+                timestep,
+                encoder_hidden_states=text_embeddings,
+                return_dict=False
+            )[0]
 
             # Perform guidance
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -88,6 +108,19 @@ def generate_panorama(
 
             # Update latents
             latents = scheduler.step(noise_pred, t, latents).prev_sample
+
+            # Apply conditioning mask if provided
+            if mask is not None:
+                # Enforce condition image at each step for face 0
+                # Get noise level for timestep
+                alpha_t = scheduler.alphas_cumprod[t]
+                noise_level = torch.sqrt(1 - alpha_t)
+
+                # Scale condition image latent according to noise level
+                condition_latent = latents[:1]  # First face is condition
+
+                # Apply mask to update only the conditioned face
+                latents = latents * (1 - mask) + condition_latent * mask
 
     # Decode latents to images
     with torch.no_grad():
@@ -113,26 +146,39 @@ def generate_panorama(
     else:
         return images
 
-def crop_image_for_overlap(image, overlap_degrees=2.5):
+
+def visualize_attention_maps(model, latents, timestep, text_embeddings, device="cuda"):
     """
-    Crop image to remove overlapping regions
-
-    Args:
-        image (PIL.Image): Image to crop
-        overlap_degrees (float): Amount of overlap in degrees
-
-    Returns:
-        PIL.Image: Cropped image
+    Visualize attention maps between faces to debug cross-face consistency
     """
-    width, height = image.size
+    # This is a debugging function that can be used to visualize how attention
+    # flows between different faces of the cubemap
 
-    # Calculate crop margins
-    standard_fov = 90.0
-    actual_fov = standard_fov + (2 * overlap_degrees)
+    attention_maps = {}
 
-    margin_ratio = overlap_degrees / actual_fov
-    margin_x = int(width * margin_ratio)
-    margin_y = int(height * margin_ratio)
+    def get_attention_hook(layer_name):
+        def hook(module, input, output):
+            attention_maps[layer_name] = output[1]  # Usually attention weights are second output
+        return hook
 
-    # Crop image
-    return image.crop((margin_x, margin_y, width - margin_x, height - margin_y))
+    # Register hooks on attention layers
+    hooks = []
+    for name, module in model.unet.named_modules():
+        if "attn2" in name:  # Cross-attention layers
+            hooks.append(module.register_forward_hook(get_attention_hook(name)))
+
+    # Forward pass to get attention maps
+    with torch.no_grad():
+        model.unet(
+            latents,
+            timestep,
+            encoder_hidden_states=text_embeddings,
+            return_dict=False
+        )
+
+    # Remove hooks
+    for hook in hooks:
+        hook.remove()
+
+    # Process and return attention maps
+    return attention_maps
