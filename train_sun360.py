@@ -190,7 +190,7 @@ if __name__ == "__main__":
                         help="Batch size")
     parser.add_argument("--num_epochs", type=int, default=1,
                         help="Number of epochs")
-    parser.add_argument("--learning_rate", type=float, default=1e-5,
+    parser.add_argument("--learning_rate", type=float, default=3e-4,
                         help="Learning rate")
     parser.add_argument("--image_size", type=int, default=512,
                         help="Image size")
