@@ -10,8 +10,6 @@ from tqdm import tqdm
 import argparse
 import json
 import logging
-import wandb
-from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
@@ -111,12 +109,12 @@ def generate_validation_images(model, validation_data, device, output_dir, step)
             equirect_path = os.path.join(validation_output_dir, f"img_{i}_panorama.png")
             equirect.save(equirect_path)
 
-            # Log to wandb if available
-            if args.use_wandb:
-                wandb.log({
-                    f"validation_img_{i}": wandb.Image(equirect_path),
-                    "step": step
-                })
+            # Log to wandb if available - disabled since not using wandb
+            # if args.use_wandb:
+            #     wandb.log({
+            #         f"validation_img_{i}": wandb.Image(equirect_path),
+            #         "step": step
+            #     })
         except Exception as e:
             logger.error(f"Error generating equirectangular: {e}")
 
@@ -188,9 +186,9 @@ def train_model(args):
 
     logger.info(f"Configuration saved to {config_path}")
 
-    # Initialize wandb if requested
-    if args.use_wandb:
-        wandb.init(project="cubediff", config=vars(args))
+    # Initialize wandb if requested - disabled since not using wandb
+    # if args.use_wandb:
+    #     wandb.init(project="cubediff", config=vars(args))
 
     # Initialize model
     logger.info(f"Initializing model from {args.pretrained_model_path}")
@@ -361,13 +359,14 @@ def train_model(args):
                     # Conditional (empty text, but could be replaced with real text)
                     text_embeddings = empty_text_embeddings.repeat(batch_size * num_faces // 6, 1, 1)
 
-                # Forward pass for noise prediction
-                noise_pred = model.unet(
+                # Forward pass for noise prediction with positional encoding
+                noise_pred = model(
                     noisy_latents,
                     timesteps,
                     encoder_hidden_states=text_embeddings,
+                    pos_enc=pos_enc,
                     return_dict=False
-                )[0]
+                )
 
                 # Calculate loss
                 if args.v_prediction:
@@ -420,13 +419,13 @@ def train_model(args):
                     "lr": lr_scheduler.get_last_lr()[0]
                 })
 
-                # Log to wandb if available
-                if args.use_wandb:
-                    wandb.log({
-                        "loss": avg_loss,
-                        "learning_rate": lr_scheduler.get_last_lr()[0],
-                        "step": global_step
-                    })
+                # Log to wandb if available - disabled since not using wandb
+                # if args.use_wandb:
+                #     wandb.log({
+                #         "loss": avg_loss,
+                #         "learning_rate": lr_scheduler.get_last_lr()[0],
+                #         "step": global_step
+                #     })
 
                 # Save checkpoint periodically
                 if global_step > 0 and global_step % args.save_every == 0:
@@ -468,9 +467,9 @@ def train_model(args):
 
     logger.info(f"Training complete after {global_step} steps.")
 
-    # Close wandb if used
-    if args.use_wandb:
-        wandb.finish()
+    # Close wandb if used - disabled since not using wandb
+    # if args.use_wandb:
+    #     wandb.finish()
 
 
 def train_distributed(rank, world_size, args):
@@ -572,8 +571,9 @@ if __name__ == "__main__":
                         help="Number of validation samples to generate")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,
                         help="Path to checkpoint to resume from")
-    parser.add_argument("--use_wandb", action="store_true",
-                        help="Use Weights & Biases for logging")
+    # Disabled since not using wandb
+    # parser.add_argument("--use_wandb", action="store_true",
+    #                     help="Use Weights & Biases for logging")
 
     # Hardware and performance
     parser.add_argument("--num_workers", type=int, default=4,
