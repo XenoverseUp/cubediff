@@ -2,7 +2,7 @@ import os
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from torch.cuda.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import LambdaLR
 import numpy as np
@@ -10,6 +10,7 @@ from tqdm import tqdm
 import argparse
 import json
 import logging
+import gc
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
@@ -27,485 +28,359 @@ logger = logging.getLogger(__name__)
 
 
 def get_lr_scheduler(optimizer, warmup_steps, total_steps):
-    """
-    Create learning rate scheduler with warm-up as described in the paper
-    """
     def lr_lambda(current_step):
         if current_step < warmup_steps:
-            # Linear warm-up phase
             return float(current_step) / float(max(1, warmup_steps))
-        else:
-            # Cosine decay phase
-            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
-            return max(0.0, 0.5 * (1.0 + np.cos(np.pi * progress)))
-
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return max(0.0, 0.5 * (1.0 + np.cos(np.pi * progress)))
     return LambdaLR(optimizer, lr_lambda)
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, global_step, args, name=None):
-    """
-    Save training checkpoint
-    """
-    if name:
-        checkpoint_path = os.path.join(args.output_dir, f"{name}.pt")
-    else:
-        checkpoint_path = os.path.join(args.output_dir, f"checkpoint-epoch-{epoch}-step-{global_step}.pt")
-
-    torch.save({
+    os.makedirs(args.output_dir, exist_ok=True)
+    base = f"checkpoint-epoch-{epoch}-step-{global_step}" if name is None else name
+    path = os.path.join(args.output_dir, f"{base}.pt")
+    state = {
         "epoch": epoch,
         "global_step": global_step,
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": model.module.state_dict() if hasattr(model, 'module') else model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
         "args": vars(args),
-    }, checkpoint_path)
-
-    logger.info(f"Saved checkpoint to {checkpoint_path}")
-
-    # Save final model weights separately for easier loading
+    }
+    torch.save(state, path)
+    logger.info(f"Saved checkpoint to {path}")
     if name == "final_model":
-        weights_path = os.path.join(args.output_dir, "model_weights.pt")
-        torch.save(model.state_dict(), weights_path)
-        logger.info(f"Saved model weights to {weights_path}")
+        wpath = os.path.join(args.output_dir, "model_weights.pt")
+        torch.save(state['model_state_dict'], wpath)
+        logger.info(f"Saved model weights to {wpath}")
 
 
 def generate_validation_images(model, validation_data, device, output_dir, step):
-    """
-    Generate validation images using the current model
-    """
     model.eval()
-    validation_output_dir = os.path.join(output_dir, f"validation_step_{step}")
-    os.makedirs(validation_output_dir, exist_ok=True)
-
+    out_dir = os.path.join(output_dir, f"validation_step_{step}")
+    os.makedirs(out_dir, exist_ok=True)
     from src.inference import generate_panorama
-
     for i, data in enumerate(validation_data):
-        file_name = data["file_name"]
-
-        # Get front face as conditioning
-        condition_image = data["images"][0].unsqueeze(0).to(device)
-
-        # Create empty text prompt
-        empty_prompts = [""] * 6
-
-        # Generate panorama
-        generated_faces = generate_panorama(
+        fn = data["file_name"]
+        cond = data["images"][0].unsqueeze(0).to(device)
+        prompts = [""] * 6
+        faces = generate_panorama(
             model=model,
-            prompts=empty_prompts,  # Using empty prompts for image-only
-            condition_image=condition_image,
-            num_inference_steps=30,  # Faster for validation
+            prompts=prompts,
+            condition_image=cond,
+            num_inference_steps=30,
             device=device,
             output_type="pil"
         )
-
-        # Save individual faces
-        for j, face in enumerate(generated_faces):
-            face_path = os.path.join(validation_output_dir, f"img_{i}_face_{j}.png")
-            face.save(face_path)
-
-        # Save equirectangular
+        for j, face in enumerate(faces):
+            face.save(os.path.join(out_dir, f"{fn}_face_{j}.png"))
         try:
-            equirect = cubemap_to_equirectangular(generated_faces)
-            equirect_path = os.path.join(validation_output_dir, f"img_{i}_panorama.png")
-            equirect.save(equirect_path)
-
-            # Log to wandb if available - disabled since not using wandb
-            # if args.use_wandb:
-            #     wandb.log({
-            #         f"validation_img_{i}": wandb.Image(equirect_path),
-            #         "step": step
-            #     })
+            eq = cubemap_to_equirectangular(faces)
+            eq.save(os.path.join(out_dir, f"{fn}_panorama.png"))
         except Exception as e:
-            logger.error(f"Error generating equirectangular: {e}")
-
+            logger.error(f"Equirect error: {e}")
     model.train()
 
 
 def load_validation_data(data_root, num_samples=4, image_size=512):
-    """
-    Load a subset of the validation data for generating samples during training
-    """
-    validation_dataset = Sun360Dataset(
-        data_root=data_root,
-        image_size=image_size,
-        split="test"
-    )
-
-    indices = np.random.choice(
-        len(validation_dataset),
-        min(num_samples, len(validation_dataset)),
-        replace=False
-    )
-
-    validation_data = []
-    for idx in indices:
-        validation_data.append(validation_dataset[idx])
-
-    return validation_data
+    ds = Sun360Dataset(data_root=data_root, image_size=image_size, split="test")
+    idxs = np.random.choice(len(ds), min(num_samples, len(ds)), replace=False)
+    return [ds[i] for i in idxs]
 
 
 def calculate_v_prediction_loss(latents, noise, noise_pred, timesteps, noise_scheduler):
-    """
-    Calculate v-prediction loss as described in the paper
-    """
-    # Get alpha_t and sigma_t from timesteps
-    alpha_t = noise_scheduler.alphas_cumprod[timesteps]
-    sigma_t = torch.sqrt(1 - alpha_t)
-
-    # Reshape alpha and sigma for broadcasting
-    alpha_t = alpha_t.view(-1, 1, 1, 1)
-    sigma_t = sigma_t.view(-1, 1, 1, 1)
-
-    # Calculate v-target from the paper
-    v_target = alpha_t.sqrt() * noise - sigma_t * latents
-
-    # Calculate MSE loss between predicted v and target v
-    loss = F.mse_loss(v_target, noise_pred, reduction="mean")
-
-    return loss
+    alpha = noise_scheduler.alphas_cumprod[timesteps].view(-1, 1, 1, 1)
+    sigma = torch.sqrt(1 - alpha).view(-1, 1, 1, 1)
+    v_target = alpha.sqrt() * noise - sigma * latents
+    return F.mse_loss(v_target, noise_pred, reduction="mean")
 
 
 def train_model(args):
-    """
-    Train CubeDiff model with Sun360 dataset using image-only conditioning
-    """
-    # Set seed for reproducibility
     if args.seed:
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.seed)
 
-    # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
-
-    # Save configuration
-    config_path = os.path.join(args.output_dir, "config.json")
-    with open(config_path, 'w') as f:
+    with open(os.path.join(args.output_dir, "config.json"), 'w') as f:
         json.dump(vars(args), f, indent=4)
+    logger.info(f"Config saved to {args.output_dir}/config.json")
 
-    logger.info(f"Configuration saved to {config_path}")
+    if args.distributed:
+        world_size = torch.cuda.device_count()
+        mp.spawn(train_distributed, args=(world_size, args), nprocs=world_size, join=True)
+        return
 
-    # Initialize wandb if requested - disabled since not using wandb
-    # if args.use_wandb:
-    #     wandb.init(project="cubediff", config=vars(args))
-
-    # Initialize model
-    logger.info(f"Initializing model from {args.pretrained_model_path}")
+    device = torch.device(args.device)
     model = CubeDiff(
         pretrained_model_path=args.pretrained_model_path,
         enable_overlap=args.enable_overlap,
         face_overlap_degrees=args.face_overlap_degrees,
         vae_scale_factor=args.vae_scale_factor
-    )
-    model.to(args.device)
-
-    # Set up gradient accumulation if needed
-    effective_batch_size = args.batch_size * args.gradient_accumulation_steps
-    logger.info(f"Effective batch size: {effective_batch_size}")
-
-    # Set up optimizer with weight decay
-    param_groups = [
-        {
-            "params": [p for n, p in model.unet.named_parameters()
-                      if not any(nd in n for nd in ["bias", "LayerNorm.weight"]) and p.requires_grad],
-            "weight_decay": args.weight_decay,
-        },
-        {
-            "params": [p for n, p in model.unet.named_parameters()
-                      if any(nd in n for nd in ["bias", "LayerNorm.weight"]) and p.requires_grad],
-            "weight_decay": 0.0,
-        },
-    ]
+    ).to(device)
+    model.enable_gradient_checkpointing()
+    torch.cuda.empty_cache()
 
     optimizer = AdamW(
-        param_groups,
+        [
+            {
+                "params": [p for n, p in model.unet.named_parameters()
+                           if p.requires_grad and not any(x in n for x in ["bias", "LayerNorm.weight"])] ,
+                "weight_decay": args.weight_decay
+            },
+            {
+                "params": [p for n, p in model.unet.named_parameters()
+                           if p.requires_grad and any(x in n for x in ["bias", "LayerNorm.weight"])] ,
+                "weight_decay": 0.0
+            },
+        ],
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
-        eps=args.adam_epsilon,
+        eps=args.adam_epsilon
     )
 
-    # Set up dataset and dataloader
-    logger.info(f"Loading dataset from {args.data_root}")
-    train_dataset = Sun360Dataset(
+    train_ds = Sun360Dataset(
         data_root=args.data_root,
         image_size=args.image_size,
         enable_overlap=args.enable_overlap,
         face_overlap_degrees=args.face_overlap_degrees,
         split="train"
     )
-
-    # Set up distributed training if requested
-    if args.distributed:
-        world_size = torch.cuda.device_count()
-        mp.spawn(train_distributed, args=(world_size, args), nprocs=world_size, join=True)
-        return
-
-    train_dataloader = DataLoader(
-        train_dataset,
+    train_loader = DataLoader(
+        train_ds,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True if args.device != "cpu" else False,
+        pin_memory=(args.device != "cpu"),
         drop_last=True
     )
+    val_data = load_validation_data(args.data_root, args.validation_samples, args.image_size)
 
-    # Load validation data
-    validation_data = load_validation_data(
-        args.data_root,
-        num_samples=args.validation_samples,
-        image_size=args.image_size
-    )
-
-    # Calculate total training steps
-    total_steps = args.num_epochs * len(train_dataloader) // args.gradient_accumulation_steps
-
-    # Set up learning rate scheduler with warm-up
+    total_steps = args.num_epochs * len(train_loader) // args.gradient_accumulation_steps
     warmup_steps = int(args.warmup_ratio * total_steps)
-    lr_scheduler = get_lr_scheduler(optimizer, warmup_steps, total_steps)
-
-    logger.info(f"Training for {args.num_epochs} epochs, {total_steps} total steps, {warmup_steps} warmup steps")
-
-    # Initialize noise scheduler
+    scheduler = get_lr_scheduler(optimizer, warmup_steps, total_steps)
     noise_scheduler = model.get_noise_scheduler(
         num_train_timesteps=args.num_train_timesteps,
         beta_start=args.beta_start,
         beta_end=args.beta_end,
         beta_schedule=args.beta_schedule
     )
-
-    # Initialize mixed precision scaler if requested
     scaler = GradScaler() if args.mixed_precision and args.device != "cpu" else None
 
-    # Resume from checkpoint if provided
-    start_epoch = 0
-    global_step = 0
-
+    start_epoch, global_step = 0, 0
     if args.resume_from_checkpoint:
-        logger.info(f"Resuming from checkpoint: {args.resume_from_checkpoint}")
-        checkpoint = torch.load(args.resume_from_checkpoint, map_location=args.device)
+        ckpt = torch.load(args.resume_from_checkpoint, map_location=device)
+        model.load_state_dict(ckpt.get("model_state_dict", ckpt))
+        optimizer.load_state_dict(ckpt.get("optimizer_state_dict", {}))
+        if ckpt.get("scheduler_state_dict"):
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        start_epoch = ckpt.get("epoch", 0) + 1
+        global_step = ckpt.get("global_step", 0)
 
-        if "model_state_dict" in checkpoint:
-            model.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            model.load_state_dict(checkpoint)
-
-        if "optimizer_state_dict" in checkpoint:
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-        if "scheduler_state_dict" in checkpoint and checkpoint["scheduler_state_dict"] is not None:
-            lr_scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-
-        if "epoch" in checkpoint:
-            start_epoch = checkpoint["epoch"] + 1
-
-        if "global_step" in checkpoint:
-            global_step = checkpoint["global_step"]
-
-        logger.info(f"Resumed from epoch {start_epoch}, global step {global_step}")
-
-    # Pre-generate empty text embeddings once
-    empty_prompt = ""
-    empty_text_embeddings = model.encode_text([empty_prompt] * 6, args.device)
-
-    # Training loop
-    model.train()
-    logger.info("Starting training...")
-
-    # Define nullcontext for use when mixed_precision is False
-    class nullcontext:
-        def __enter__(self): return None
-        def __exit__(self, *args): pass
-
-    # For gradient accumulation
+    empty_emb = model.encode_text(["" for _ in range(6)], device)
     optimizer.zero_grad(set_to_none=True)
-    accumulated_loss = 0.0
 
     for epoch in range(start_epoch, args.num_epochs):
         epoch_loss = 0.0
-        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{args.num_epochs}")
+        if args.distributed:
+            raise RuntimeError("Distributed training should use train_distributed entrypoint.")
 
-        for batch_idx, batch in enumerate(progress_bar):
-            # Get data from batch
-            cubemap_images = batch["images"].to(args.device)  # [B, 6, 3, H, W]
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.num_epochs}")):
+            imgs = batch["images"].to(device)
+            B, F, C, H, W = imgs.shape
+            imgs = imgs.view(B * F, C, H, W)
 
-            # Reshape for processing
-            batch_size, num_faces, channels, height, width = cubemap_images.shape
-            images = cubemap_images.view(batch_size * num_faces, channels, height, width)
-
-            # Training step with optional mixed precision
-            with autocast() if args.mixed_precision and args.device != "cpu" else nullcontext():
-                # Encode images to latents
+            with autocast(enabled=args.mixed_precision and args.device != "cpu"):
                 with torch.no_grad():
-                    latents = model.vae.encode(images).latent_dist.sample() * args.vae_scale_factor
-
-                # Add noise to latents
+                    latents = model.vae.encode(imgs).latent_dist.sample() * args.vae_scale_factor
                 noise = torch.randn_like(latents)
                 timesteps = torch.randint(
-                    0, noise_scheduler.config.num_train_timesteps, (batch_size * num_faces,),
-                    device=args.device
+                    0,
+                    noise_scheduler.config.num_train_timesteps,
+                    (B * F,),
+                    device=device
                 ).long()
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-
-                # Generate position encodings
-                pos_enc = generate_cubemap_positional_encoding(
-                    batch_size, latents.shape[2], latents.shape[3], device=args.device)
-
-                # Apply classifier-free guidance dropout (randomly drop text condition)
-                if np.random.random() < args.text_dropout_prob:
-                    # Unconditional (no text)
-                    text_embeddings = empty_text_embeddings.repeat(batch_size * num_faces // 6, 1, 1)
-                else:
-                    # Conditional (empty text, but could be replaced with real text)
-                    text_embeddings = empty_text_embeddings.repeat(batch_size * num_faces // 6, 1, 1)
-
-                # Forward pass for noise prediction with positional encoding
+                noisy = noise_scheduler.add_noise(latents, noise, timesteps)
+                pos_enc = generate_cubemap_positional_encoding(B, latents.shape[2], latents.shape[3], device)
+                text_emb = empty_emb.repeat(B, 1, 1)
                 noise_pred = model(
-                    noisy_latents,
+                    noisy,
                     timesteps,
-                    encoder_hidden_states=text_embeddings,
-                    pos_enc=pos_enc,
-                    return_dict=False
+                    encoder_hidden_states=text_emb,
+                    pos_enc=pos_enc
                 )
-
-                # Calculate loss
                 if args.v_prediction:
-                    # Calculate v-prediction loss as per the paper
-                    loss = calculate_v_prediction_loss(
-                        latents, noise, noise_pred, timesteps, noise_scheduler
-                    )
+                    loss = calculate_v_prediction_loss(latents, noise, noise_pred, timesteps, noise_scheduler)
                 else:
-                    # Standard noise prediction loss
                     loss = F.mse_loss(noise_pred, noise, reduction="mean")
-
-                # Scale loss for gradient accumulation
                 loss = loss / args.gradient_accumulation_steps
-                accumulated_loss += loss.item()
 
-            # Update model with optional mixed precision
-            if args.mixed_precision and scaler and args.device != "cpu":
+            if scaler:
                 scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
-                # Step optimizer after accumulation steps
-                if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+            if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+                if scaler:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                     scaler.step(optimizer)
                     scaler.update()
-                    lr_scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    global_step += 1
-            else:
-                loss.backward()
-
-                # Step optimizer after accumulation steps
-                if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+                else:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                     optimizer.step()
-                    lr_scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    global_step += 1
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
 
-            # Update progress for all batches
+                if global_step % args.save_every == 0:
+                    save_checkpoint(model, optimizer, scheduler, epoch, global_step, args,
+                                    name=f"checkpoint-step-{global_step}")
+                    generate_validation_images(model, val_data, args.device, args.output_dir, global_step)
+
             epoch_loss += loss.item() * args.gradient_accumulation_steps
 
-            # Only log when optimizer is stepped
-            if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
-                avg_loss = accumulated_loss
-                accumulated_loss = 0.0
+        avg_loss = epoch_loss / len(train_loader)
+        logger.info(f"Epoch {epoch+1}/{args.num_epochs} completed. Avg loss: {avg_loss:.6f}")
+        save_checkpoint(model, optimizer, scheduler, epoch, global_step, args,
+                        name=f"checkpoint-epoch-{epoch+1}")
+        generate_validation_images(model, val_data, args.device, args.output_dir, f"epoch_{epoch+1}")
+        gc.collect()
+        torch.cuda.empty_cache()
 
-                progress_bar.set_postfix({
-                    "loss": avg_loss,
-                    "lr": lr_scheduler.get_last_lr()[0]
-                })
-
-                # Log to wandb if available - disabled since not using wandb
-                # if args.use_wandb:
-                #     wandb.log({
-                #         "loss": avg_loss,
-                #         "learning_rate": lr_scheduler.get_last_lr()[0],
-                #         "step": global_step
-                #     })
-
-                # Save checkpoint periodically
-                if global_step > 0 and global_step % args.save_every == 0:
-                    save_checkpoint(
-                        model, optimizer, lr_scheduler,
-                        epoch, global_step, args,
-                        name=f"checkpoint-step-{global_step}"
-                    )
-
-                    # Generate validation samples
-                    generate_validation_images(
-                        model, validation_data, args.device,
-                        args.output_dir, global_step
-                    )
-
-        # End of epoch
-        epoch_loss /= len(train_dataloader)
-        logger.info(f"Epoch {epoch+1}/{args.num_epochs} completed. Average loss: {epoch_loss:.6f}")
-
-        # Save checkpoint after each epoch
-        save_checkpoint(
-            model, optimizer, lr_scheduler,
-            epoch, global_step, args,
-            name=f"checkpoint-epoch-{epoch+1}"
-        )
-
-        # Generate validation samples after each epoch
-        generate_validation_images(
-            model, validation_data, args.device,
-            args.output_dir, f"epoch_{epoch+1}"
-        )
-
-    # Save final model
-    save_checkpoint(
-        model, optimizer, lr_scheduler,
-        args.num_epochs-1, global_step, args,
-        name="final_model"
-    )
-
+    save_checkpoint(model, optimizer, scheduler, args.num_epochs-1, global_step, args, name="final_model")
     logger.info(f"Training complete after {global_step} steps.")
-
-    # Close wandb if used - disabled since not using wandb
-    # if args.use_wandb:
-    #     wandb.finish()
 
 
 def train_distributed(rank, world_size, args):
-    """
-    Distributed training entry point
-    """
-    # Initialize process group
-    dist.init_process_group(
-        backend='nccl',
-        init_method='env://',
-        world_size=world_size,
-        rank=rank
-    )
-
-    # Set device
+    dist.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
     torch.cuda.set_device(rank)
     args.device = f"cuda:{rank}"
+    torch.manual_seed(args.seed + rank)
 
-    # Create model
+    # Prepare dataset and sampler
+    train_ds = Sun360Dataset(
+        data_root=args.data_root,
+        image_size=args.image_size,
+        enable_overlap=args.enable_overlap,
+        face_overlap_degrees=args.face_overlap_degrees,
+        split="train"
+    )
+    sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
+    loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        sampler=sampler,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True
+    )
+
+    # Model
     model = CubeDiff(
         pretrained_model_path=args.pretrained_model_path,
         enable_overlap=args.enable_overlap,
         face_overlap_degrees=args.face_overlap_degrees,
         vae_scale_factor=args.vae_scale_factor
-    )
-    model = torch.nn.parallel.DistributedDataParallel(
-        model.to(args.device),
-        device_ids=[rank],
-        output_device=rank
-    )
+    ).to(args.device)
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[rank], output_device=rank)
 
-    # Rest of training code would go here, modified for DDP
-    # ...
+    # Optimizer and scheduler
+    optimizer = AdamW(
+        model.parameters(),
+        lr=args.learning_rate,
+        betas=(args.adam_beta1, args.adam_beta2),
+        eps=args.adam_epsilon
+    )
+    total_steps = args.num_epochs * len(loader) // args.gradient_accumulation_steps
+    warmup_steps = int(args.warmup_ratio * total_steps)
+    scheduler = get_lr_scheduler(optimizer, warmup_steps, total_steps)
 
-    # Clean up
+    # Noise scheduler and scaler
+    noise_scheduler = model.module.get_noise_scheduler(
+        num_train_timesteps=args.num_train_timesteps,
+        beta_start=args.beta_start,
+        beta_end=args.beta_end,
+        beta_schedule=args.beta_schedule
+    )
+    scaler = GradScaler() if args.mixed_precision else None
+
+    # Prepare validation data on rank 0
+    val_data = load_validation_data(args.data_root, args.validation_samples, args.image_size) if rank == 0 else None
+    if rank == 0:
+        empty_emb = model.module.encode_text(["" for _ in range(6)], args.device)
+
+    global_step = 0
+    for epoch in range(args.num_epochs):
+        sampler.set_epoch(epoch)
+        epoch_loss = 0.0
+
+        for batch_idx, batch in enumerate(tqdm(loader, desc=f"Rank {rank} Epoch {epoch+1}/{args.num_epochs}")):
+            imgs = batch["images"].to(args.device)
+            B, F, C, H, W = imgs.shape
+            imgs = imgs.view(B * F, C, H, W)
+
+            with autocast(enabled=args.mixed_precision):
+                with torch.no_grad():
+                    latents = model.module.vae.encode(imgs).latent_dist.sample() * args.vae_scale_factor
+                noise = torch.randn_like(latents)
+                timesteps = torch.randint(
+                    0, noise_scheduler.config.num_train_timesteps,
+                    (B * F,), device=args.device
+                ).long()
+                noisy = noise_scheduler.add_noise(latents, noise, timesteps)
+                pos_enc = generate_cubemap_positional_encoding(B, latents.shape[2], latents.shape[3], args.device)
+                text_emb = empty_emb.repeat(B, 1, 1)
+                noise_pred = model(
+                    noisy,
+                    timesteps,
+                    encoder_hidden_states=text_emb,
+                    pos_enc=pos_enc
+                )
+                loss = calculate_v_prediction_loss(latents, noise, noise_pred, timesteps, noise_scheduler) \
+                       if args.v_prediction else F.mse_loss(noise_pred, noise, reduction="mean")
+                loss = loss / args.gradient_accumulation_steps
+
+            if scaler:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+                if scaler:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                global_step += 1
+
+                if rank == 0 and global_step % args.save_every == 0:
+                    save_checkpoint(model, optimizer, scheduler, epoch, global_step, args,
+                                    name=f"ddp-checkpoint-{global_step}")
+                    generate_validation_images(model.module, val_data, args.device, args.output_dir, global_step)
+
+            epoch_loss += loss.item() * args.gradient_accumulation_steps
+
+        if rank == 0:
+            avg_loss = epoch_loss / len(loader)
+            logger.info(f"DDP Epoch {epoch+1}/{args.num_epochs} avg loss: {avg_loss:.6f}")
+            save_checkpoint(model, optimizer, scheduler, epoch, global_step, args,
+                            name=f"ddp-epoch-{epoch+1}")
+            generate_validation_images(model.module, val_data, args.device, args.output_dir, f"ddp_epoch_{epoch+1}")
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    if rank == 0:
+        save_checkpoint(model, optimizer, scheduler, args.num_epochs-1, global_step, args, name="final_model")
     dist.destroy_process_group()
+
 
 
 if __name__ == "__main__":
@@ -571,9 +446,6 @@ if __name__ == "__main__":
                         help="Number of validation samples to generate")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None,
                         help="Path to checkpoint to resume from")
-    # Disabled since not using wandb
-    # parser.add_argument("--use_wandb", action="store_true",
-    #                     help="Use Weights & Biases for logging")
 
     # Hardware and performance
     parser.add_argument("--num_workers", type=int, default=4,

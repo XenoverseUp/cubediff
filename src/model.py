@@ -64,6 +64,11 @@ class CubeDiff(nn.Module):
         for param in self.vae.parameters():
             param.requires_grad = False
 
+    def enable_gradient_checkpointing(self):
+        """Enable gradient checkpointing to save memory"""
+        print("Enabling gradient checkpointing for UNet...")
+        self.unet.enable_gradient_checkpointing()
+
     def encode_text(self, prompts, device="cuda"):
         """
         Encode text prompts to embeddings
@@ -186,9 +191,7 @@ class CubeDiff(nn.Module):
             pos_enc = generate_cubemap_positional_encoding(
                 batch_size // 6, height, width, device=latents.device)
 
-
-
-        # Improved positional encoding application - concatenate to first 2 channels
+        # Apply positional encoding to latents
         # Clone to avoid modifying the original latents
         modified_latents = latents.clone()
 
