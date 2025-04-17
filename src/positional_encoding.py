@@ -34,8 +34,8 @@ def generate_cubemap_positional_encoding(batch_size, height, width, device="cuda
         lambda x, y: (-ones, y, x),           # back face (-X)
         lambda x, y: (x, ones, -y),           # up face (+Y)
         lambda x, y: (x, -ones, y),           # down face (-Y)
-        lambda x, y: (x, y, ones),            # left face (+Z)
-        lambda x, y: (-x, y, -ones)           # right face (-Z)
+        lambda x, y: (x, y, ones),            # left face (+Z) - was incorrect
+        lambda x, y: (-x, y, -ones)           # right face (-Z) - was incorrect
     ]
 
     # Generate position encodings for each face

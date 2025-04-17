@@ -172,6 +172,16 @@ class CubeDiff(nn.Module):
     def forward(self, latents, timestep, encoder_hidden_states=None, mask=None, pos_enc=None):
         """
         Forward pass through the model
+
+        Args:
+            latents (torch.Tensor): Latent tensor
+            timestep (torch.Tensor): Current timestep
+            encoder_hidden_states (torch.Tensor): Text embeddings
+            mask (torch.Tensor, optional): Mask for conditioned faces
+            pos_enc (torch.Tensor, optional): Positional encoding
+
+        Returns:
+            torch.Tensor: Predicted noise
         """
         # Get latent shape
         batch_size, channels, height, width = latents.shape
@@ -181,20 +191,22 @@ class CubeDiff(nn.Module):
             pos_enc = generate_cubemap_positional_encoding(
                 batch_size // 6, height, width, device=latents.device)
 
-        # Apply positional encoding to latents more subtly
+        # Apply positional encoding to latents
+        # Clone to avoid modifying the original latents
         modified_latents = latents.clone()
 
-        # Add positional encoding with a proper scale to ensure it's not too dominant
+        # Add positional encoding to all channels with appropriate scaling
+        # The paper suggests this helps with cross-face consistency
         for i in range(channels):
-            # Use a smaller scale factor to make position encoding more subtle
-            scale = 0.05 / (i+1)  # Reduced from 0.1
-            modified_latents[:, i, :, :] += pos_enc[:, 0, :, :] * scale
+            scale = 0.1 / (i+1)  # Apply diminishing scale to deeper channels
+            modified_latents[:, i, :, :] = modified_latents[:, i, :, :] + pos_enc[:, 0, :, :] * scale
 
         # Forward pass through UNet
         noise_pred = self.unet(
             modified_latents,
             timestep,
             encoder_hidden_states=encoder_hidden_states,
+            cross_attention_kwargs={"scale": 1.0},
             return_dict=False
         )[0]
 
