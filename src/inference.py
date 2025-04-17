@@ -86,13 +86,14 @@ def generate_panorama(
             timestep = t.expand(latent_model_input.shape[0]).to(device)
 
             # Add positional encoding to each face's latents
-            # Clone input to avoid modifying the original
-            modified_latents = latent_model_input.clone()
+            # Important: Apply positioning consistently
+            pos_enc_repeated = pos_enc.repeat(2, 1, 1, 1)  # Repeat for CFG
 
-            # Apply position encoding to all channels with diminishing scale
+            # Apply position encoding to latents
+            modified_latents = latent_model_input.clone()
             for j in range(modified_latents.shape[1]):
                 scale = 0.1 / (j+1)  # Diminishing scale
-                modified_latents[:, j, :, :] = modified_latents[:, j, :, :] + pos_enc.repeat(2, 1, 1, 1)[:, 0, :, :] * scale
+                modified_latents[:, j, :, :] += pos_enc_repeated[:, 0, :, :] * scale
 
             # Predict noise
             noise_pred = model.unet(
@@ -109,18 +110,44 @@ def generate_panorama(
             # Update latents
             latents = scheduler.step(noise_pred, t, latents).prev_sample
 
-            # Apply conditioning mask if provided
+            # Apply conditioning mask if provided - with proper handling
             if mask is not None:
-                # Enforce condition image at each step for face 0
-                # Get noise level for timestep
-                alpha_t = scheduler.alphas_cumprod[t]
-                noise_level = torch.sqrt(1 - alpha_t)
+                # Get the denoising progress based on current timestep
+                alpha_t = scheduler.alphas_cumprod[t].item()
+                noise_level = torch.sqrt(1 - alpha_t).item()
 
-                # Scale condition image latent according to noise level
-                condition_latent = latents[:1]  # First face is condition
+                # Create a dynamic mask that changes based on:
+                # 1. The denoising progress (lower influence as we get closer to the final image)
+                # 2. The distance from face 0 (less influence on faces further away)
 
-                # Apply mask to update only the conditioned face
-                latents = latents * (1 - mask) + condition_latent * mask
+                # Start with stronger conditioning early in denoising when the image is mostly noise
+                # and gradually reduce it as the image forms
+                conditioning_strength = max(0.1, noise_level)  # Never go below 10% influence
+
+                # Create distance-based falloff for different faces
+                # Face 0 is fully conditioned, adjacent faces partially, opposite face minimally
+                face_weights = torch.tensor([1.0, 0.3, 0.4, 0.4, 0.4, 0.3], device=latents.device)
+                face_weights = face_weights.view(-1, 1, 1, 1)  # Shape for broadcasting
+
+                # Calculate final dynamic mask
+                # Scale original mask by both denoising progress and face distance
+                dynamic_mask = mask * conditioning_strength * face_weights
+
+                # Get the first face latents (the conditioned one)
+                first_face_latents = latents[:1]
+
+                # For each face, apply a different amount of conditioning
+                for face_idx in range(6):
+                    if face_idx == 0:
+                        # First face is already correctly conditioned
+                        continue
+
+                    # Apply conditioning with face-specific weight
+                    face_mask = dynamic_mask[face_idx:face_idx+1]
+                    latents[face_idx:face_idx+1] = (
+                        latents[face_idx:face_idx+1] * (1 - face_mask) +
+                        first_face_latents * face_mask
+                    )
 
     # Decode latents to images
     with torch.no_grad():

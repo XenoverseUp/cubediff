@@ -38,30 +38,18 @@ class SynchronizedGroupNorm(nn.Module):
             channels_per_group = num_channels // num_groups
             x_reshaped = x.reshape(actual_batch, 6, num_groups, channels_per_group, height, width)
 
-            # Compute mean and variance across all spatial dimensions AND all faces simultaneously
-            # This is the key difference - we compute statistics across all faces together
-            # to ensure color consistency
-            mean = x_reshaped.mean(dim=(1, 4, 5), keepdim=True)  # Faces and spatial dims
-            var = ((x_reshaped - mean) ** 2).mean(dim=(1, 4, 5), keepdim=True)  # Faces and spatial dims
+            # Compute mean and variance across spatial dimensions AND all faces simultaneously
+            mean = x_reshaped.mean(dim=(1, 4, 5), keepdim=True)
+            var = ((x_reshaped - mean) ** 2).mean(dim=(1, 4, 5), keepdim=True)
 
-            # Normalize
-            x_normalized = (x_reshaped - mean) / torch.sqrt(var + self.eps)
+            # Normalize with increased stability
+            x_normalized = (x_reshaped - mean) / (torch.sqrt(var + self.eps) + 1e-8)
 
             # Reshape back
             x_normalized = x_normalized.reshape(batch_size, num_channels, height, width)
 
             # Apply weight and bias
             return x_normalized * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
-        else:
-            # Standard GroupNorm for non-cubemap inputs
-            num_groups = min(self.num_groups, num_channels)
-            return F.group_norm(
-                x,
-                num_groups=num_groups,
-                weight=self.weight,
-                bias=self.bias,
-                eps=self.eps
-            )
 
     def _forward_3d(self, x):
         # Handle 3D input: [batch, sequence, channels]
