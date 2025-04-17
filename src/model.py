@@ -1,16 +1,12 @@
 import torch
 import torch.nn as nn
 
-from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
-from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
-from diffusers.schedulers.scheduling_ddim import DDIMScheduler
-from transformers.models.clip.modeling_clip import CLIPTextModel
-from transformers.models.clip.tokenization_clip import CLIPTokenizer
+from diffusers import AutoencoderKL, UNet2DConditionModel, DDIMScheduler
+from transformers import CLIPTextModel, CLIPTokenizer
 
 from .synced_norm import replace_groupnorm_with_synced
 from .attention_inflation import inflate_attention_layers
 from .positional_encoding import generate_cubemap_positional_encoding
-
 
 class CubeDiff(nn.Module):
     def __init__(
@@ -25,10 +21,8 @@ class CubeDiff(nn.Module):
 
         print(f"Initializing CubeDiff with model: {pretrained_model_path}")
 
-        # Store VAE scale factor
         self.vae_scale_factor = vae_scale_factor
 
-        # Load pretrained components
         self.tokenizer = CLIPTokenizer.from_pretrained(
             pretrained_model_path, subfolder="tokenizer")
         self.text_encoder = CLIPTextModel.from_pretrained(
@@ -50,13 +44,11 @@ class CubeDiff(nn.Module):
         self.enable_overlap = enable_overlap
         self.face_overlap_degrees = face_overlap_degrees
 
-        # Freeze text encoder and VAE
         self._freeze_modules()
 
         print("CubeDiff model initialized.")
 
     def _freeze_modules(self):
-        """Freeze text encoder and VAE parameters"""
         print("Freezing text encoder and VAE parameters...")
         for param in self.text_encoder.parameters():
             param.requires_grad = False
