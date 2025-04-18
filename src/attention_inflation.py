@@ -13,68 +13,30 @@ class CubemapAttention(nn.Module):
     def forward(self, hidden_states, **kwargs):
         batch_size, sequence_length, dim = hidden_states.shape
 
-        # Check if this input contains cubemap faces (batch size divisible by 6)
-        # Also handle classifier-free guidance which doubles the batch size
+        # Check if this is a cubemap input (batch size divisible by 6)
         if batch_size % 6 == 0:
-            # Process cubemap together for consistency across faces
             actual_batch = batch_size // 6
 
-            # Reshape to join faces: (B*6, L, D) -> (B, 6*L, D)
-            hidden_states_reshaped = hidden_states.reshape(actual_batch, 6 * sequence_length, dim)
+            # Simple reshape to join all faces: (B*6, L, D) -> (B, 6*L, D)
+            hidden_states = hidden_states.reshape(actual_batch, 6 * sequence_length, dim)
 
-            # Handle encoder hidden states differently (cross attention)
+            # Handle encoder hidden states for cross-attention
             encoder_hidden_states = kwargs.get("encoder_hidden_states", None)
-
-            if encoder_hidden_states is not None:
-                # For cross-attention, we need to make sure encoder_hidden_states are properly aligned
-                encoder_batch_size = encoder_hidden_states.shape[0]
-                encoder_seq_length = encoder_hidden_states.shape[1]
-                encoder_dim = encoder_hidden_states.shape[2]
-
-                # If we have per-face text embeddings (one text embedding per cubemap face)
-                if encoder_batch_size == batch_size:
-                    # Reshape text embeddings to be grouped by cubemap
-                    # (B*6, S, D) -> (B, 6, S, D) -> (B, 6*S, D)
-                    encoder_hidden_states = encoder_hidden_states.reshape(
-                        actual_batch, 6, encoder_seq_length, encoder_dim
-                    )
-                    # We don't want to interleave tokens, but rather keep each face's
-                    # tokens together, so we reshape differently
-                    encoder_hidden_states = encoder_hidden_states.reshape(
-                        actual_batch, 6 * encoder_seq_length, encoder_dim
-                    )
-                # If we have one text embedding per cubemap (same text for all faces)
-                elif encoder_batch_size == actual_batch:
-                    # No reshaping needed, as each cubemap has one text embedding
-                    pass
-                # For classifier-free guidance (concatenated conditional and unconditional)
-                elif encoder_batch_size == 2 * actual_batch:
-                    # For classifier-free guidance, we don't need to modify the encoder states
-                    # The first half contains unconditional and the second half contains conditional
-                    # encodings, which is already what we want
-                    pass
-
-                # Update kwargs with proper encoder states
+            if encoder_hidden_states is not None and encoder_hidden_states.shape[0] == batch_size:
+                # If we have per-face encodings, reshape them properly
+                encoder_hidden_states = encoder_hidden_states.reshape(
+                    actual_batch, 6 * encoder_hidden_states.shape[1], encoder_hidden_states.shape[2]
+                )
                 kwargs["encoder_hidden_states"] = encoder_hidden_states
 
-            # For self-attention, also reshape the attention mask if present
-            attention_mask = kwargs.get("attention_mask", None)
-            if attention_mask is not None:
-                # Reshape attention mask to match reshaped hidden states
-                attention_mask = attention_mask.reshape(actual_batch, -1)
-                kwargs["attention_mask"] = attention_mask
+            # Process through original attention
+            result = self.original_attention(hidden_states, **kwargs)
 
-            # Call original attention with reshaped states
-            result = self.original_attention(hidden_states_reshaped, **kwargs)
-
-            # Reshape result back to original format: (B, 6*L, D) -> (B*6, L, D)
+            # Reshape back to original format
             result = result.reshape(batch_size, sequence_length, dim)
-
             return result
         else:
-            # For non-cubemap inputs, use normal attention
             return self.original_attention(hidden_states, **kwargs)
-
 
 def inflate_attention_layers(unet_model):
     """

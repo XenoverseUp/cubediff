@@ -91,8 +91,9 @@ def generate_panorama(
 
             # Apply position encoding to all channels with diminishing scale
             for j in range(modified_latents.shape[1]):
-                scale = 0.1 / (j+1)  # Diminishing scale
-                modified_latents[:, j, :, :] = modified_latents[:, j, :, :] + pos_enc.repeat(2, 1, 1, 1)[:, 0, :, :] * scale
+                channel_idx = j % 2  # Alternate between U and V coordinates
+                scale = 0.1 / (j//2 + 1)  # Diminishing scale per coordinate pair
+                modified_latents[:, j, :, :] = modified_latents[:, j, :, :] + pos_enc[:, channel_idx, :, :] * scale
 
             # Predict noise
             noise_pred = model.unet(

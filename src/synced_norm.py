@@ -38,11 +38,10 @@ class SynchronizedGroupNorm(nn.Module):
             channels_per_group = num_channels // num_groups
             x_reshaped = x.reshape(actual_batch, 6, num_groups, channels_per_group, height, width)
 
-            # Compute mean and variance across all spatial dimensions AND all faces simultaneously
-            # This is the key difference - we compute statistics across all faces together
-            # to ensure color consistency
-            mean = x_reshaped.mean(dim=(1, 4, 5), keepdim=True)  # Faces and spatial dims
-            var = ((x_reshaped - mean) ** 2).mean(dim=(1, 4, 5), keepdim=True)  # Faces and spatial dims
+            # Compute mean and variance across all faces AND spatial dimensions
+            # This ensures color consistency across the entire cubemap
+            mean = x_reshaped.mean(dim=(1, 4, 5), keepdim=True)
+            var = x_reshaped.var(dim=(1, 4, 5), keepdim=True, unbiased=False)
 
             # Normalize
             x_normalized = (x_reshaped - mean) / torch.sqrt(var + self.eps)
@@ -54,10 +53,9 @@ class SynchronizedGroupNorm(nn.Module):
             return x_normalized * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
         else:
             # Standard GroupNorm for non-cubemap inputs
-            num_groups = min(self.num_groups, num_channels)
             return F.group_norm(
                 x,
-                num_groups=num_groups,
+                num_groups=min(self.num_groups, num_channels),
                 weight=self.weight,
                 bias=self.bias,
                 eps=self.eps
@@ -71,36 +69,35 @@ class SynchronizedGroupNorm(nn.Module):
         if batch_size % 6 == 0:
             actual_batch = batch_size // 6
 
-            # Reshape to separate cubemap faces
-            x_reshaped = x.reshape(actual_batch, 6, sequence_length, num_channels)
+            # IMPORTANT: This reshaping must match CubemapAttention
+            # In CubemapAttention, x is reshaped from [B*6, L, D] to [B, 6*L, D]
+            # We need to temporarily reshape differently to compute statistics
+            # across faces, then reshape back to match CubemapAttention
 
-            # Compute mean and variance across faces and sequence length
-            mean = x_reshaped.mean(dim=(1, 2), keepdim=True)
-            var = x_reshaped.var(dim=(1, 2), keepdim=True, unbiased=False)
+            # First reshape to separate faces: [B*6, L, C] -> [B, 6, L, C]
+            x_temp = x.reshape(actual_batch, 6, sequence_length, num_channels)
 
-            # Normalize
-            x_normalized = (x_reshaped - mean) / torch.sqrt(var + self.eps)
+            # Compute statistics across faces only (not sequence)
+            # This makes more sense for attention features
+            mean = x_temp.mean(dim=1, keepdim=True)  # only across faces
+            var = x_temp.var(dim=1, keepdim=True, unbiased=False)
 
-            # Reshape back
+            # Normalize while still in [B, 6, L, C] format
+            x_normalized = (x_temp - mean) / torch.sqrt(var + self.eps)
+
+            # Reshape back to original format: [B, 6, L, C] -> [B*6, L, C]
             x_normalized = x_normalized.reshape(batch_size, sequence_length, num_channels)
+
+            # Apply weights and bias
+            return x_normalized * self.weight.view(1, 1, -1) + self.bias.view(1, 1, -1)
         else:
             # For non-cubemap inputs, use standard LayerNorm approach
             mean = x.mean(dim=-1, keepdim=True)
             var = x.var(dim=-1, keepdim=True, unbiased=False)
             x_normalized = (x - mean) / torch.sqrt(var + self.eps)
 
-        # Adapt weights to actual channel size
-        if num_channels == self.weight.shape[0]:
-            # Use our weights directly if channels match
-            weight = self.weight.view(1, 1, -1)
-            bias = self.bias.view(1, 1, -1)
-        else:
-            # Otherwise use a default approach (ones and zeros)
-            weight = torch.ones(1, 1, num_channels, device=x.device)
-            bias = torch.zeros(1, 1, num_channels, device=x.device)
-
-        return x_normalized * weight + bias
-
+            # Apply weights and bias
+            return x_normalized * self.weight.view(1, 1, -1) + self.bias.view(1, 1, -1)
 
 def replace_groupnorm_with_synced(model):
     """
