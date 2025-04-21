@@ -33,18 +33,15 @@ class CubemapDataset(Dataset):
         self.enable_overlap = enable_overlap
         self.face_overlap_degrees = face_overlap_degrees
 
-        # Get list of panorama files
         self.panorama_files = []
         for root, _, files in os.walk(data_root):
             for file in files:
                 if file.lower().endswith(('.jpg', '.jpeg', '.png')):
                     self.panorama_files.append(os.path.join(root, file))
 
-        # Load text prompts
         with open(text_file, 'r') as f:
             self.text_data = json.load(f)
 
-        # Setup transforms
         self.transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
@@ -58,40 +55,31 @@ class CubemapDataset(Dataset):
 
     def __getitem__(self, idx):
         """Get item from dataset"""
-        # Get panorama file path
         panorama_path = self.panorama_files[idx]
         file_name = os.path.basename(panorama_path)
 
-        # Load panorama image
         panorama = Image.open(panorama_path).convert("RGB")
 
-        # Convert to cubemap faces
         faces = equirectangular_to_cubemap(panorama)
 
-        # Apply transforms to each face
         face_tensors = []
         for face in faces:
             face_tensor = self.transform(face)
             face_tensors.append(face_tensor)
 
-        # Stack face tensors
         faces_tensor = torch.stack(face_tensors)
 
-        # Get text prompts
         if file_name in self.text_data:
-            # If file has specific prompts
             prompts = self.text_data[file_name]
         else:
-            # Use default prompts
             prompts = self.text_data.get("default", [""] * 6)
 
-        # Make sure we have 6 prompts
         if len(prompts) < 6:
             prompts = prompts + [""] * (6 - len(prompts))
 
         return {
             "images": faces_tensor,  # [6, 3, H, W]
-            "prompts": prompts,      # List of 6 prompts
+            "prompts": prompts,
             "file_name": file_name
         }
 
@@ -112,14 +100,12 @@ class Sun360Dataset(Dataset):
         self.face_overlap_degrees = face_overlap_degrees
         self.split = split
 
-        # Get panoramic images from RGB folder
         self.rgb_dir = os.path.join(self.data_root, "RGB")
         self.panorama_files = []
         for file in os.listdir(self.rgb_dir):
             if file.lower().endswith(('.jpg', '.jpeg', '.png')):
                 self.panorama_files.append(os.path.join(self.rgb_dir, file))
 
-        # Setup transforms
         self.transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
@@ -132,27 +118,22 @@ class Sun360Dataset(Dataset):
         return len(self.panorama_files)
 
     def __getitem__(self, idx):
-        # Get panorama file path
         panorama_path = self.panorama_files[idx]
         file_name = os.path.basename(panorama_path)
 
-        # Load panorama image
         panorama = Image.open(panorama_path).convert("RGB")
 
-        # Convert equirectangular to cubemap faces
         faces = equirectangular_to_cubemap(
             panorama,
             enable_overlap=self.enable_overlap,
             overlap_degrees=self.face_overlap_degrees
         )
 
-        # Apply transforms to each face
         face_tensors = []
         for face in faces:
             face_tensor = self.transform(face)
             face_tensors.append(face_tensor)
 
-        # Stack face tensors
         faces_tensor = torch.stack(face_tensors)  # [6, 3, H, W]
 
         return {

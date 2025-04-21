@@ -19,7 +19,6 @@ from src.dataset import Sun360Dataset
 from src.positional_encoding import generate_cubemap_positional_encoding
 from src.cubemap_utils import cubemap_to_equirectangular
 
-# Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -260,7 +259,6 @@ def train_distributed(rank, world_size, args):
     args.device = f"cuda:{rank}"
     torch.manual_seed(args.seed + rank)
 
-    # Prepare dataset and sampler
     train_ds = Sun360Dataset(
         data_root=args.data_root,
         image_size=args.image_size,
@@ -278,7 +276,6 @@ def train_distributed(rank, world_size, args):
         drop_last=True
     )
 
-    # Model
     model = CubeDiff(
         pretrained_model_path=args.pretrained_model_path,
         enable_overlap=args.enable_overlap,
@@ -287,7 +284,6 @@ def train_distributed(rank, world_size, args):
     ).to(args.device)
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[rank], output_device=rank)
 
-    # Optimizer and scheduler
     optimizer = AdamW(
         model.parameters(),
         lr=args.learning_rate,
@@ -298,7 +294,6 @@ def train_distributed(rank, world_size, args):
     warmup_steps = int(args.warmup_ratio * total_steps)
     scheduler = get_lr_scheduler(optimizer, warmup_steps, total_steps)
 
-    # Noise scheduler and scaler
     noise_scheduler = model.module.get_noise_scheduler(
         num_train_timesteps=args.num_train_timesteps,
         beta_start=args.beta_start,
@@ -307,7 +302,6 @@ def train_distributed(rank, world_size, args):
     )
     scaler = GradScaler() if args.mixed_precision else None
 
-    # Prepare validation data on rank 0
     val_data = load_validation_data(args.data_root, args.validation_samples, args.image_size) if rank == 0 else None
     if rank == 0:
         empty_emb = model.module.encode_text(["" for _ in range(6)], args.device)

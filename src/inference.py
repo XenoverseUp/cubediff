@@ -38,25 +38,19 @@ def generate_panorama(
     """
     print(f"Generating panorama with {num_inference_steps} steps...")
 
-    # Move model to device
     model.to(device)
     model.eval()
 
-    # Process text prompts
     if isinstance(prompts, str):
-        prompts = [prompts] * 6  # Use same prompt for all faces
+        prompts = [prompts] * 6
 
-    # Check number of prompts
     assert len(prompts) == 6, f"Expected 6 prompts, got {len(prompts)}"
 
-    # Encode text prompts
     text_embeddings = model.encode_text(prompts, device)
 
-    # Prepare classifier-free guidance
     uncond_embeddings = model.encode_text([""] * 6, device)
     text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
 
-    # Initialize scheduler
     scheduler = DDIMScheduler(
         beta_start=0.00085,
         beta_end=0.012,
@@ -66,14 +60,12 @@ def generate_panorama(
     )
     scheduler.set_timesteps(num_inference_steps, device=device)
 
-    # Prepare latents
     if condition_image is not None:
         latents, mask = model.prepare_conditioned_latents(condition_image, device)
     else:
         latents = model.prepare_latents(batch_size=1, height=height, width=width, device=device)
         mask = None
 
-    # Generate position encodings
     pos_enc = generate_cubemap_positional_encoding(1, latents.shape[2], latents.shape[3], device=device)
 
     # Denoising loop
@@ -86,10 +78,8 @@ def generate_panorama(
             timestep = t.expand(latent_model_input.shape[0]).to(device)
 
             # Add positional encoding to each face's latents
-            # Clone input to avoid modifying the original
             modified_latents = latent_model_input.clone()
 
-            # Apply position encoding to all channels with diminishing scale
             for j in range(modified_latents.shape[1]):
                 channel_idx = j % 2  # Alternate between U and V coordinates
                 scale = 0.1 / (j//2 + 1)  # Diminishing scale per coordinate pair
@@ -110,14 +100,7 @@ def generate_panorama(
             # Update latents
             latents = scheduler.step(noise_pred, t, latents).prev_sample
 
-            # Apply conditioning mask if provided
             if mask is not None:
-                # Enforce condition image at each step for face 0
-                # Get noise level for timestep
-                alpha_t = scheduler.alphas_cumprod[t]
-                noise_level = torch.sqrt(1 - alpha_t)
-
-                # Scale condition image latent according to noise level
                 condition_latent = latents[:1]  # First face is condition
 
                 # Apply mask to update only the conditioned face

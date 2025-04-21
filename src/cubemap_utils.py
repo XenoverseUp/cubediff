@@ -16,52 +16,42 @@ def equirectangular_to_cubemap(equirect_img, face_size=512, enable_overlap=True,
     Returns:
         list: List of 6 PIL images [front, back, up, down, left, right]
     """
-    # Get equirectangular dimensions
     equirect_width, equirect_height = equirect_img.size
     equirect = np.array(equirect_img)
 
-    # Calculate actual FOV based on overlap
     fov = 90.0
     if enable_overlap:
         fov += 2 * overlap_degrees
 
-    # Initialize cubemap faces
     faces = []
 
-    # For each face - following the order: front, back, up, down, left, right
+    # front, back, up, down, left, right
     for face_idx in range(6):
-        # Create face image
         face = np.zeros((face_size, face_size, 3), dtype=np.uint8)
 
-        # Map each pixel
         for y in range(face_size):
             for x in range(face_size):
-                # Normalize to [-1, 1]
+                # Normalize: [-1, 1]
                 nx = 2 * (x + 0.5) / face_size - 1
                 ny = 2 * (y + 0.5) / face_size - 1
 
-                # Calculate FOV multiplier
                 fov_mul = math.tan(math.radians(fov / 2)) / math.tan(math.radians(90 / 2))
                 nx *= fov_mul
                 ny *= fov_mul
 
-                # Get 3D vector based on face
-                # Carefully follow the correct convention:
-                # +X = front, -X = back, +Y = up, -Y = down, +Z = left, -Z = right
-                if face_idx == 0:  # Front (+X)
+                if face_idx == 0:
                     vec = [1.0, ny, -nx]
-                elif face_idx == 1:  # Back (-X)
+                elif face_idx == 1:
                     vec = [-1.0, ny, nx]
-                elif face_idx == 2:  # Up (+Y)
+                elif face_idx == 2:
                     vec = [nx, 1.0, -ny]
-                elif face_idx == 3:  # Down (-Y)
+                elif face_idx == 3:
                     vec = [nx, -1.0, ny]
-                elif face_idx == 4:  # Left (+Z)
-                    vec = [nx, ny, 1.0]  # Fixed to match conventions
-                elif face_idx == 5:  # Right (-Z)
-                    vec = [-nx, ny, -1.0]  # Fixed to match conventions
+                elif face_idx == 4:
+                    vec = [nx, ny, 1.0]
+                elif face_idx == 5:
+                    vec = [-nx, ny, -1.0]
 
-                # Normalize vector
                 norm = math.sqrt(vec[0]**2 + vec[1]**2 + vec[2]**2)
                 vec = [v / norm for v in vec]
 
@@ -74,7 +64,6 @@ def equirectangular_to_cubemap(equirect_img, face_size=512, enable_overlap=True,
                 v = (theta / math.pi + 0.5)
 
                 # Sample from equirectangular image with bilinear interpolation
-                # This gives better quality than nearest neighbor
                 equirect_x = u * equirect_width
                 equirect_y = v * equirect_height
 
@@ -88,15 +77,12 @@ def equirectangular_to_cubemap(equirect_img, face_size=512, enable_overlap=True,
                 p10 = equirect[y1, x0]
                 p11 = equirect[y1, x1]
 
-                # Calculate weights
                 wx = equirect_x - x0
                 wy = equirect_y - y0
 
-                # Bilinear interpolation
                 value = (1 - wx) * (1 - wy) * p00 + wx * (1 - wy) * p01 + \
                         (1 - wx) * wy * p10 + wx * wy * p11
 
-                # Set pixel in face
                 face[y, x] = value.astype(np.uint8)
 
         faces.append(Image.fromarray(face))

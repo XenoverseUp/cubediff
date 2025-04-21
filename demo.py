@@ -16,7 +16,6 @@ def main(args):
     Args:
         args: Command-line arguments
     """
-    # Load model
 
     if args.model_path:
         print(f"Loading model from {args.model_path}")
@@ -26,7 +25,6 @@ def main(args):
         face_overlap_degrees=2.5
     )
 
-    # Load checkpoint if provided
     if args.model_path and os.path.exists(args.model_path):
         checkpoint = torch.load(args.model_path, map_location="cpu")
         if "model_state_dict" in checkpoint:
@@ -35,31 +33,24 @@ def main(args):
             model.load_state_dict(checkpoint)
         print("Model loaded successfully")
 
-    # Prepare device
     device = args.device if torch.cuda.is_available() else "cpu"
     model.to(device)
 
-    # Prepare prompts
     if args.prompt_file:
-        # Load prompts from file
         with open(args.prompt_file, 'r') as f:
             prompts = [line.strip() for line in f.readlines()]
-            # Make sure we have exactly 6 prompts
             if len(prompts) < 6:
                 prompts = prompts + [prompts[0]] * (6 - len(prompts))
             elif len(prompts) > 6:
                 prompts = prompts[:6]
     else:
-        # Use single prompt for all faces
         prompts = [args.prompt] * 6
 
     print(f"Using prompts: {prompts}")
 
-    # Prepare conditioning image if provided
     condition_image = None
     if args.condition_image and os.path.exists(args.condition_image):
         print(f"Using condition image: {args.condition_image}")
-        # Load and transform condition image
         img = Image.open(args.condition_image).convert("RGB")
         transform = transforms.Compose([
             transforms.Resize((args.height, args.width)),
@@ -68,7 +59,6 @@ def main(args):
         ])
         condition_image = transform(img).unsqueeze(0).to(device)
 
-    # Generate panorama
     print("Generating panorama...")
     cubemap_faces = generate_panorama(
         model=model,
@@ -82,16 +72,13 @@ def main(args):
         output_type="pil"
     )
 
-    # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Save individual faces
     for i, face in enumerate(cubemap_faces):
         face_path = os.path.join(args.output_dir, f"face_{i}.png")
         face.save(face_path)
         print(f"Saved {face_path}")
 
-    # Convert to equirectangular and save
     print("Converting to equirectangular...")
     equirect = cubemap_to_equirectangular(
         cubemap_faces,
